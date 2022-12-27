@@ -1,8 +1,117 @@
 use proc_macro::TokenStream;
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
+
+// fn unwrap_option(ty: &Type) -> Option<Type> {
+//     if let syn::Type::Path(syn::TypePath {
+//         qself: None,
+//         path:
+//             syn::Path {
+//                 segments,
+//                 // [syn::PathSegment {
+//                 //     ident: "Option",
+//                 //     arguments:
+//                 //         syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+//                 //             args: [syn::GenericArgument::Type(inner)],
+//                 //             ..
+//                 //         }),
+//                 // }],
+//                 ..
+//             },
+//     }) = ty
+//     {
+//         if segments.len() != 1 {
+//             return None;
+//         }
+//         let segment = segments.first().unwrap();
+//         if segment.ident != "Option" {
+//             return None;
+//         }
+//         if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+//             ref args,
+//             ..
+//         }) = segment.arguments
+//         {
+//             if args.len() != 1 {
+//                 return None;
+//             }
+//             let arg = args.first().unwrap();
+//             if let syn::GenericArgument::Type(ty) = arg {
+//                 eprintln!("an option of {:?}!", ty);
+//                 return Some(ty.clone());
+//             }
+//         }
+//     };
+//     None
+// }
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
-    let _ = input;
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let builder_name = format_ident!("{}Builder", name);
 
-    unimplemented!()
+    let fields = match input.data {
+        Data::Struct(data) => match data.fields {
+            Fields::Named(fields) => fields
+                .named
+                .into_iter()
+                .map(|field| {
+                    let ident = field.ident.unwrap();
+                    let ty = field.ty;
+                    // unwrap_option(&ty);
+                    (ident, ty)
+                })
+                .collect::<Vec<_>>(),
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
+    };
+    let builder_fields = fields.iter().map(|(ident, ty)| {
+        quote! {#ident: Option<#ty>}
+    });
+    let builder_fields_init = fields.iter().map(|(ident, _ty)| {
+        quote! {#ident: None}
+    });
+
+    let builder_methods = fields.iter().map(|(ident, ty)| {
+        quote! {
+            pub fn #ident(&mut self, #ident:#ty)->&mut Self{
+                self.#ident=Some(#ident);
+                self
+            }
+        }
+    });
+
+    let build_function_field_setting = fields.iter().map(|(ident, _ty)| {
+        quote! {
+            #ident: self.#ident.take().ok_or(concat!("Field ", stringify!(#ident), " not set"))?
+        }
+    });
+
+    let expanded = quote! {
+        pub struct #builder_name{
+            #(#builder_fields),*
+        }
+
+        impl #name {
+            pub fn builder() -> #builder_name{
+                #builder_name {
+                    #(#builder_fields_init),*
+                }
+            }
+        }
+        impl #builder_name{
+            #(#builder_methods)*
+        }
+        impl #builder_name{
+            pub fn build(&mut self)->Result<#name, Box<dyn std::error::Error>>{
+                let r = #name {
+                    #(#build_function_field_setting),*
+                };
+                Ok(r)
+            }
+        }
+    };
+    expanded.into()
 }
