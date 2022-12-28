@@ -1,49 +1,42 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 
-// fn unwrap_option(ty: &Type) -> Option<Type> {
-//     if let syn::Type::Path(syn::TypePath {
-//         qself: None,
-//         path:
-//             syn::Path {
-//                 segments,
-//                 // [syn::PathSegment {
-//                 //     ident: "Option",
-//                 //     arguments:
-//                 //         syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-//                 //             args: [syn::GenericArgument::Type(inner)],
-//                 //             ..
-//                 //         }),
-//                 // }],
-//                 ..
-//             },
-//     }) = ty
-//     {
-//         if segments.len() != 1 {
-//             return None;
-//         }
-//         let segment = segments.first().unwrap();
-//         if segment.ident != "Option" {
-//             return None;
-//         }
-//         if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-//             ref args,
-//             ..
-//         }) = segment.arguments
-//         {
-//             if args.len() != 1 {
-//                 return None;
-//             }
-//             let arg = args.first().unwrap();
-//             if let syn::GenericArgument::Type(ty) = arg {
-//                 eprintln!("an option of {:?}!", ty);
-//                 return Some(ty.clone());
-//             }
-//         }
-//     };
-//     None
-// }
+fn unwrap_option(ty: &Type) -> Option<Type> {
+    if let syn::Type::Path(syn::TypePath {
+        qself: None,
+        path: syn::Path { segments, .. },
+    }) = ty
+    {
+        if segments.len() != 1 {
+            return None;
+        }
+        let segment = segments.first().unwrap();
+        if segment.ident != "Option" {
+            return None;
+        }
+        if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+            ref args,
+            ..
+        }) = segment.arguments
+        {
+            if args.len() != 1 {
+                return None;
+            }
+            let arg = args.first().unwrap();
+            if let syn::GenericArgument::Type(ty) = arg {
+                return Some(ty.clone());
+            }
+        }
+    };
+    None
+}
+
+struct StructField {
+    ident: Ident,
+    ty: Type,
+    optional: bool,
+}
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -59,22 +52,33 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .map(|field| {
                     let ident = field.ident.unwrap();
                     let ty = field.ty;
-                    // unwrap_option(&ty);
-                    (ident, ty)
+                    if let Some(inner) = unwrap_option(&ty) {
+                        StructField {
+                            ident,
+                            ty: inner,
+                            optional: true,
+                        }
+                    } else {
+                        StructField {
+                            ident,
+                            ty,
+                            optional: false,
+                        }
+                    }
                 })
                 .collect::<Vec<_>>(),
             _ => unimplemented!(),
         },
         _ => unimplemented!(),
     };
-    let builder_fields = fields.iter().map(|(ident, ty)| {
+    let builder_fields = fields.iter().map(|StructField { ident, ty, .. }| {
         quote! {#ident: Option<#ty>}
     });
-    let builder_fields_init = fields.iter().map(|(ident, _ty)| {
+    let builder_fields_init = fields.iter().map(|StructField { ident, .. }| {
         quote! {#ident: None}
     });
 
-    let builder_methods = fields.iter().map(|(ident, ty)| {
+    let builder_methods = fields.iter().map(|StructField { ident, ty, .. }| {
         quote! {
             pub fn #ident(&mut self, #ident:#ty)->&mut Self{
                 self.#ident=Some(#ident);
@@ -83,9 +87,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
-    let build_function_field_setting = fields.iter().map(|(ident, _ty)| {
-        quote! {
-            #ident: self.#ident.take().ok_or(concat!("Field ", stringify!(#ident), " not set"))?
+    let build_function_field_setting = fields.iter().map(|StructField { ident, optional, .. }| {
+        if *optional {
+            quote! {
+                #ident: self.#ident.take()
+            }
+        } else {
+            quote! {
+                #ident: self.#ident.take().ok_or(concat!("Field ", stringify!(#ident), " not set"))?
+            }
         }
     });
 
