@@ -59,36 +59,44 @@ fn get_inner_type(ty: &Type) -> Option<Type> {
     None
 }
 
-fn get_append_fn(f: &Field) -> Option<Ident> {
+fn get_append_fn(f: &Field) -> Result<Option<Ident>, syn::Error> {
     assert!(f.attrs.len() <= 1);
     if let Some(attr) = f.attrs.first() {
         let meta = attr.parse_meta().unwrap();
         let ident = meta.path().segments[0].ident.clone();
         assert!(ident == "builder");
         match meta {
-            Meta::List(metalist) => {
+            Meta::List(ref metalist) => {
                 assert!(metalist.nested.len() == 1);
                 match &metalist.nested[0] {
                     syn::NestedMeta::Meta(inner_meta) => {
                         assert!(inner_meta.path().segments.len() == 1);
-                        assert!(inner_meta.path().segments[0].ident == "each");
+                        if inner_meta.path().segments[0].ident != "each" {
+                            return Err(syn::Error::new_spanned(
+                                meta,
+                                "expected `builder(each = \"...\")`",
+                            ));
+                        }
                         match inner_meta {
                             Meta::NameValue(name_value) => match &name_value.lit {
                                 syn::Lit::Str(strlit) => {
-                                    return Some(syn::Ident::new(&strlit.value(), ident.span()));
+                                    return Ok(Some(syn::Ident::new(
+                                        &strlit.value(),
+                                        ident.span(),
+                                    )));
                                 }
                                 _ => panic!("Expected literal string as argument to each"),
                             },
-                            _ => panic!("Wront syntax on builder attribute"),
+                            _ => panic!("Wrong syntax on builder attribute"),
                         }
                     }
-                    _ => panic!("Wront syntax on builder attribute"),
+                    _ => panic!("Wrong syntax on builder attribute"),
                 }
             }
-            _ => panic!("Wront syntax on builder attribute"),
+            _ => panic!("Wrong syntax on builder attribute"),
         }
     }
-    None
+    Ok(None)
 }
 
 #[derive(Debug)]
@@ -111,7 +119,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .named
                 .into_iter()
                 .map(|field| {
-                    let append_fn = get_append_fn(&field);
+                    let append_fn = match get_append_fn(&field) {
+                        Ok(v) => v,
+                        Err(s) => return Err(s),
+                    };
                     let ident = field.ident.unwrap();
                     let ty = field.ty;
                     let (ty, optional) = match unwrap_option(&ty) {
@@ -123,17 +134,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     } else {
                         ty
                     };
-                    StructField {
+                    Ok(StructField {
                         ident,
                         ty,
                         optional,
                         append_fn: append_fn,
-                    }
+                    })
                 })
-                .collect::<Vec<_>>(),
+                .collect::<Result<Vec<_>, _>>(),
             _ => unimplemented!(),
         },
         _ => unimplemented!(),
+    };
+    let fields = match fields {
+        Ok(v) => v,
+        Err(e) => {
+            return e.into_compile_error().into();
+        }
     };
     let builder_fields = fields.iter().map(
         |StructField {
@@ -143,9 +160,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
              ..
          }| {
             if append_fn.is_some() {
-                quote! {#ident: Vec<#ty>}
+                quote! {#ident: std::vec::Vec<#ty>}
             } else {
-                quote! {#ident: Option<#ty>}
+                quote! {#ident: std::option::Option<#ty>}
             }
         },
     );
@@ -154,9 +171,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
              ident, append_fn, ..
          }| {
             if append_fn.is_some() {
-                quote! {#ident: Vec::new()}
+                quote! {#ident: std::vec::Vec::new()}
             } else {
-                quote! {#ident: None}
+                quote! {#ident: std::option::Option::None}
             }
         },
     );
@@ -182,13 +199,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
             let set_quote = if append_fn.is_none() {
                 quote! {
                     pub fn #ident(&mut self, #ident:#ty)->&mut Self{
-                        self.#ident=Some(#ident);
+                        self.#ident=std::option::Option::Some(#ident);
                         self
                     }
                 }
             } else if append_fn.as_ref().unwrap().to_string() != ident.to_string() {
                 quote! {
-                    pub fn #ident(&mut self, #ident:Vec<#ty>)->&mut Self{
+                    pub fn #ident(&mut self, #ident:std::vec::Vec<#ty>)->&mut Self{
                         self.#ident=#ident;
                         self
                     }
@@ -210,7 +227,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         } else if append_fn.is_some() {
             quote! {
-                #ident: std::mem::replace(&mut self.#ident, Vec::new())
+                #ident: std::mem::replace(&mut self.#ident, std::vec::Vec::new())
             }
         } else {
             quote! {
@@ -235,7 +252,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             #(#builder_methods)*
         }
         impl #builder_name{
-            pub fn build(&mut self)->Result<#name, Box<dyn std::error::Error>>{
+            pub fn build(&mut self)->std::result::Result<#name, std::boxed::Box<dyn std::error::Error>>{
                 let r = #name {
                     #(#build_function_field_setting),*
                 };
